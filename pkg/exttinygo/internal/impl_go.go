@@ -25,6 +25,9 @@ func hostRowWriterPutInt32(_ uint64, _ uint32, _, _, _ uint32) {
 func hostRowWriterPutInt64(_ uint64, _ uint32, _, _ uint32, _ uint64) {
 }
 
+func hostRowWriterPutRecordID(_ uint64, _ uint32, _, _ uint32, _ uint64) {
+}
+
 func hostRowWriterPutFloat32(_ uint64, _ uint32, _, _ uint32, _ float32) {
 }
 
