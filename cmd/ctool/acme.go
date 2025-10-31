@@ -12,7 +12,7 @@ import (
 // nolint
 func newAcmeCmd() *cobra.Command {
 	acmeAddCmd := &cobra.Command{
-		Use:   "add [<domain1,domain2...>]",
+		Use:   "add [<domain1,domain2,domain3...>]",
 		Short: "Add one or more domains to the ACME domain list",
 		Args:  cobra.ExactArgs(1),
 		RunE:  acmeAdd,
