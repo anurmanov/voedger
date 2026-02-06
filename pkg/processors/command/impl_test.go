@@ -744,10 +744,10 @@ func setUp(t *testing.T, prepare func(wsb appdef.IWorkspaceBuilder, cfg *istruct
 	require.NoError(err)
 
 	appStructsProvider := istructsmem.Provide(cfgs, iratesce.TestBucketsFactory,
-		payloads.ProvideIAppTokensFactory(itokensjwt.TestTokensJWT()), appStorageProvider, isequencer.SequencesTrustLevel_0)
+		payloads.ProvideIAppTokensFactory(itokensjwt.TestTokensJWT()), appStorageProvider, isequencer.SequencesTrustLevel_0, nil)
 
 	secretReader := isecretsimpl.ProvideSecretReader()
-	n10nBroker, n10nBrokerCleanup := in10nmem.ProvideEx2(in10n.Quotas{
+	n10nBroker, n10nBrokerCleanup := in10nmem.NewN10nBroker(in10n.Quotas{
 		Channels:                1000,
 		ChannelsPerSubject:      10,
 		Subscriptions:           1000,

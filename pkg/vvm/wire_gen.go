@@ -103,10 +103,14 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 	iAppStorageUncachingProviderFactory := provideIAppStorageUncachingProviderFactory(iAppStorageFactory, vvmConfig)
 	iAppStorageProvider := provideCachingAppStorageProvider(storageCacheSizeType, iMetrics, vvmName, iAppStorageUncachingProviderFactory, iTime)
 	sequencesTrustLevel := vvmConfig.SequencesTrustLevel
-	iAppStructsProvider := provideIAppStructsProvider(appConfigsTypeEmpty, bucketsFactoryType, iAppTokensFactory, iAppStorageProvider, sequencesTrustLevel)
+	iSysVvmStorage, err := provideIVVMAppTTLStorage(iAppStorageProvider)
+	if err != nil {
+		return nil, nil, err
+	}
+	iAppStructsProvider := provideIAppStructsProvider(appConfigsTypeEmpty, bucketsFactoryType, iAppTokensFactory, iAppStorageProvider, sequencesTrustLevel, iSysVvmStorage)
 	syncActualizerFactory := actualizers.ProvideSyncActualizerFactory()
 	quotas := provideN10NQuotas(vvmConfig)
-	in10nBroker, cleanup := in10nmem.ProvideEx2(quotas, iTime)
+	in10nBroker, cleanup := in10nmem.NewN10nBroker(quotas, iTime)
 	v2 := provideAppsExtensionPoints(vvmConfig)
 	buildInfo, err := provideBuildInfo()
 	if err != nil {
@@ -114,13 +118,13 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 		return nil, nil, err
 	}
 	vvmPortSource := provideVVMPortSource()
-	iFederation, cleanup2 := provideIFederation(vvmCtx, vvmConfig, vvmPortSource)
+	policyOptsForWithRetry := vvmConfig.PolicyOptsForFederationWithRetry
+	iFederation, cleanup2 := provideIFederation(vvmCtx, vvmConfig, vvmPortSource, policyOptsForWithRetry)
 	iStatelessResources := provideStatelessResources(appConfigsTypeEmpty, vvmConfig, v2, buildInfo, iAppStorageProvider, iTokens, iFederation, iAppStructsProvider, iAppTokensFactory)
 	v3 := actualizers.NewSyncActualizerFactoryFactory(syncActualizerFactory, iSecretReader, in10nBroker, iStatelessResources)
-	retryDelay := vvmConfig.AsyncActualizersRetryDelay
 	stateOpts := provideStateOpts()
 	iEmailSender := vvmConfig.EmailSender
-	basicAsyncActualizerConfig := provideBasicAsyncActualizerConfig(vvmName, iSecretReader, iTokens, iMetrics, in10nBroker, iFederation, retryDelay, stateOpts, iEmailSender)
+	basicAsyncActualizerConfig := provideBasicAsyncActualizerConfig(vvmName, iSecretReader, iTokens, iMetrics, in10nBroker, iFederation, stateOpts, iEmailSender)
 	iActualizerRunner := actualizers.ProvideActualizers(basicAsyncActualizerConfig)
 	basicSchedulerConfig := schedulers.BasicSchedulerConfig{
 		VvmName:      vvmName,
@@ -130,6 +134,7 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 		Broker:       in10nBroker,
 		Federation:   iFederation,
 		Time:         iTime,
+		EmailSender:  iEmailSender,
 	}
 	iSchedulerRunner := provideSchedulerRunner(basicSchedulerConfig)
 	v4, err := provideSidecarApps(vvmConfig)
@@ -230,15 +235,6 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 	servicePipeline := provideServicePipeline(vvmCtx, operatorCommandProcessors, operatorQueryProcessors_V1, operatorQueryProcessors_V2, operatorBLOBProcessors, iAppPartsCtlPipelineService, bootstrapOperator, adminEndpointServiceOperator, publicEndpointServiceOperator, iAppStorageProvider)
 	v8 := provideMetricsServicePortGetter(metricsService)
 	v9 := provideBuiltInAppPackages(builtInAppsArtefacts)
-	iSysVvmStorage, err := provideIVVMAppTTLStorage(iAppStorageProvider)
-	if err != nil {
-		cleanup5()
-		cleanup4()
-		cleanup3()
-		cleanup2()
-		cleanup()
-		return nil, nil, err
-	}
 	ittlStorage := storage.NewElectionsTTLStorage(iSysVvmStorage)
 	vvm := &VVM{
 		ServicePipeline:     servicePipeline,
@@ -382,8 +378,11 @@ func provideAppConfigsTypeEmpty() AppConfigsTypeEmpty {
 // The same approach does not work for IAppPartitions implementation, because the appparts.NewWithActualizerWithExtEnginesFactories() accepts
 // iextengine.ExtensionEngineFactories that must be initialized with the already filled AppConfigsType
 func provideIAppStructsProvider(cfgs AppConfigsTypeEmpty, bucketsFactory irates.BucketsFactoryType, appTokensFactory payloads.IAppTokensFactory,
-	storageProvider istorage.IAppStorageProvider, seqTrustLevel isequencer.SequencesTrustLevel) istructs.IAppStructsProvider {
-	return istructsmem.Provide(istructsmem.AppConfigsType(cfgs), bucketsFactory, appTokensFactory, storageProvider, seqTrustLevel)
+	storageProvider istorage.IAppStorageProvider, seqTrustLevel isequencer.SequencesTrustLevel, sysVvmStorage storage.ISysVvmStorage) istructs.IAppStructsProvider {
+	appTTLStorageFactory := func(clusterAppID istructs.ClusterAppID) istructs.IAppTTLStorage {
+		return storage.NewAppTTLStorage(sysVvmStorage, clusterAppID)
+	}
+	return istructsmem.Provide(istructsmem.AppConfigsType(cfgs), bucketsFactory, appTokensFactory, storageProvider, seqTrustLevel, appTTLStorageFactory)
 }
 
 func provideBasicAsyncActualizerConfig(
@@ -393,7 +392,6 @@ func provideBasicAsyncActualizerConfig(
 
 	broker in10n.IN10nBroker, federation2 federation.IFederation,
 
-	asyncActualizersRetryDelay actualizers.RetryDelay,
 	stateCfg state.StateOpts,
 	emailSender state.IEmailSender,
 ) actualizers.BasicAsyncActualizerConfig {
@@ -407,7 +405,6 @@ func provideBasicAsyncActualizerConfig(
 		StateOpts:     stateCfg,
 		IntentsLimit:  actualizers.DefaultIntentsLimit,
 		FlushInterval: actualizerFlushInterval,
-		RetryDelay:    asyncActualizersRetryDelay,
 		EmailSender:   emailSender,
 	}
 }
@@ -591,7 +588,7 @@ func provideMetricsServiceOperator(ms metrics.MetricsService) MetricsServiceOper
 }
 
 // TODO: consider vvmIdx
-func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *VVMPortSource) (federation.IFederation, func()) {
+func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *VVMPortSource, policyForWithRetry federation.PolicyOptsForWithRetry) (federation.IFederation, func()) {
 	return federation.New(vvmCtx, func() *url.URL {
 		if cfg.FederationURL != nil {
 			return cfg.FederationURL
@@ -602,7 +599,7 @@ func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *V
 			panic(err)
 		}
 		return resultFU
-	}, func() int { return vvmPortSource.adminGetter() })
+	}, func() int { return vvmPortSource.adminGetter() }, policyForWithRetry)
 }
 
 // Metrics service port could be dynamic -> need a func that will return the actual port

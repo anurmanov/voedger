@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"iter"
 	"net/http"
 	"strings"
 
@@ -39,13 +38,12 @@ func CreateOpenAPISchema(writer io.Writer, ws appdef.IWorkspace, role appdef.QNa
 }
 
 type schemaGenerator struct {
-	developer    bool
-	ws           appdef.IWorkspace
-	role         appdef.QName
-	pubTypesFunc PublishedTypesFunc
-	meta         SchemaMeta
-	types        iter.Seq2[appdef.IType,
-		iter.Seq2[appdef.OperationKind, *[]appdef.FieldName]]
+	developer      bool
+	ws             appdef.IWorkspace
+	role           appdef.QName
+	pubTypesFunc   PublishedTypesFunc
+	meta           SchemaMeta
+	types          map[appdef.IType]map[appdef.OperationKind]*[]appdef.FieldName
 	components     map[string]interface{}
 	paths          map[string]map[string]interface{}
 	schemasByType  map[string]map[appdef.OperationKind]string
@@ -55,7 +53,15 @@ type schemaGenerator struct {
 
 // generate performs the schema generation process
 func (g *schemaGenerator) generate() {
-	g.types = g.pubTypesFunc(g.ws, g.role)
+	// Materialize the iterator into a map so it can be iterated multiple times
+	g.types = make(map[appdef.IType]map[appdef.OperationKind]*[]appdef.FieldName)
+	for t, ops := range g.pubTypesFunc(g.ws, g.role) {
+		g.types[t] = make(map[appdef.OperationKind]*[]appdef.FieldName)
+		for op, fields := range ops {
+			g.types[t][op] = fields
+		}
+	}
+
 	g.collectDocSchemaTypes()
 
 	// First pass - generate schema components for types
@@ -930,6 +936,9 @@ func (g *schemaGenerator) docSchemaRefIfExist(typ appdef.QName, op appdef.Operat
 }
 
 func (g *schemaGenerator) schemaRef(typ appdef.IType, op appdef.OperationKind) string {
+	if typ == nil {
+		return sysAnySchemaRef
+	}
 	if typeSchemas, ok := g.schemasByType[typ.QName().String()]; ok {
 		if opSchema, ok := typeSchemas[op]; ok {
 			return fmt.Sprintf("#/components/schemas/%s", opSchema)
@@ -1099,26 +1108,44 @@ func (g *schemaGenerator) generateResponses(typ appdef.IType, op appdef.Operatio
 
 	case (op == appdef.OperationKind_Execute && typ.Kind() == appdef.TypeKind_Query):
 		// Collection response with results array
-		responses[statusCode200] = map[string]interface{}{
-			schemaKeyDescription: descrOK,
-			schemaKeyContent: map[string]interface{}{
-				applicationJSON: map[string]interface{}{
-					schemaKeySchema: map[string]interface{}{
-						schemaKeyType: schemaTypeObject,
-						schemaKeyProperties: map[string]interface{}{
-							fieldResults: map[string]interface{}{
-								schemaKeyType: schemaTypeArray,
-								schemaKeyItems: map[string]interface{}{
-									schemaKeyRef: g.schemaRef(typ.(appdef.IQuery).Result(), op),
+		qry := typ.(appdef.IQuery)
+		result := qry.Result()
+
+		// If Query has no result, return empty response (no content)
+		if result == nil {
+			responses[statusCode200] = map[string]interface{}{
+				schemaKeyDescription: descrOK,
+			}
+		} else {
+			// Determine the schema reference for the result
+			var resultSchemaRef string
+			if result.QName() == appdef.QNameANY {
+				resultSchemaRef = sysAnySchemaRef
+			} else {
+				resultSchemaRef = g.schemaRef(result, op)
+			}
+
+			responses[statusCode200] = map[string]interface{}{
+				schemaKeyDescription: descrOK,
+				schemaKeyContent: map[string]interface{}{
+					applicationJSON: map[string]interface{}{
+						schemaKeySchema: map[string]interface{}{
+							schemaKeyType: schemaTypeObject,
+							schemaKeyProperties: map[string]interface{}{
+								fieldResults: map[string]interface{}{
+									schemaKeyType: schemaTypeArray,
+									schemaKeyItems: map[string]interface{}{
+										schemaKeyRef: resultSchemaRef,
+									},
 								},
-							},
-							fieldError: map[string]interface{}{
-								schemaKeyRef: errorSchemaRef,
+								fieldError: map[string]interface{}{
+									schemaKeyRef: errorSchemaRef,
+								},
 							},
 						},
 					},
 				},
-			},
+			}
 		}
 	}
 	return responses

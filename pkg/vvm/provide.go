@@ -155,7 +155,7 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 	panic(wire.Build(
 		wire.Struct(new(VVM), "*"),
 		wire.Struct(new(builtinapps.APIs), "*"),
-		wire.Struct(new(schedulers.BasicSchedulerConfig), "VvmName", "SecretReader", "Tokens", "Metrics", "Broker", "Federation", "Time"),
+		wire.Struct(new(schedulers.BasicSchedulerConfig), "VvmName", "SecretReader", "Tokens", "Metrics", "Broker", "Federation", "Time", "EmailSender"),
 		provideServicePipeline,
 		provideCommandProcessors,
 		provideQueryProcessors_V1,
@@ -184,7 +184,7 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 		provideIAppStructsProvider,        // IAppStructsProvider
 		payloads.ProvideIAppTokensFactory, // IAppTokensFactory
 		provideAppPartitions,
-		in10nmem.ProvideEx2,
+		in10nmem.NewN10nBroker,
 		queryprocessor.ProvideServiceFactory,
 		query2.ProvideServiceFactory,
 		commandprocessor.ProvideServiceFactory,
@@ -245,8 +245,8 @@ func wireVVM(vvmCtx context.Context, vvmConfig *VVMConfig) (*VVM, func(), error)
 			"EmailSender",
 			"SecretsReader",
 			"SequencesTrustLevel",
-			"AsyncActualizersRetryDelay",
 			"SchemasCache",
+			"PolicyOptsForFederationWithRetry",
 		),
 	))
 }
@@ -316,8 +316,11 @@ func provideAppConfigsTypeEmpty() AppConfigsTypeEmpty {
 // The same approach does not work for IAppPartitions implementation, because the appparts.NewWithActualizerWithExtEnginesFactories() accepts
 // iextengine.ExtensionEngineFactories that must be initialized with the already filled AppConfigsType
 func provideIAppStructsProvider(cfgs AppConfigsTypeEmpty, bucketsFactory irates.BucketsFactoryType, appTokensFactory payloads.IAppTokensFactory,
-	storageProvider istorage.IAppStorageProvider, seqTrustLevel isequencer.SequencesTrustLevel) istructs.IAppStructsProvider {
-	return istructsmem.Provide(istructsmem.AppConfigsType(cfgs), bucketsFactory, appTokensFactory, storageProvider, seqTrustLevel)
+	storageProvider istorage.IAppStorageProvider, seqTrustLevel isequencer.SequencesTrustLevel, sysVvmStorage storage.ISysVvmStorage) istructs.IAppStructsProvider {
+	appTTLStorageFactory := func(clusterAppID istructs.ClusterAppID) istructs.IAppTTLStorage {
+		return storage.NewAppTTLStorage(sysVvmStorage, clusterAppID)
+	}
+	return istructsmem.Provide(istructsmem.AppConfigsType(cfgs), bucketsFactory, appTokensFactory, storageProvider, seqTrustLevel, appTTLStorageFactory)
 }
 
 func provideBasicAsyncActualizerConfig(
@@ -327,7 +330,6 @@ func provideBasicAsyncActualizerConfig(
 	metrics imetrics.IMetrics,
 	broker in10n.IN10nBroker,
 	federation federation.IFederation,
-	asyncActualizersRetryDelay actualizers.RetryDelay,
 	stateCfg state.StateOpts,
 	emailSender state.IEmailSender,
 ) actualizers.BasicAsyncActualizerConfig {
@@ -341,7 +343,6 @@ func provideBasicAsyncActualizerConfig(
 		StateOpts:     stateCfg,
 		IntentsLimit:  actualizers.DefaultIntentsLimit,
 		FlushInterval: actualizerFlushInterval,
-		RetryDelay:    asyncActualizersRetryDelay,
 		EmailSender:   emailSender,
 	}
 }
@@ -527,7 +528,7 @@ func provideMetricsServiceOperator(ms metrics.MetricsService) MetricsServiceOper
 }
 
 // TODO: consider vvmIdx
-func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *VVMPortSource) (federation.IFederation, func()) {
+func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *VVMPortSource, policyForWithRetry federation.PolicyOptsForWithRetry) (federation.IFederation, func()) {
 	return federation.New(vvmCtx, func() *url.URL {
 		if cfg.FederationURL != nil {
 			return cfg.FederationURL
@@ -538,7 +539,7 @@ func provideIFederation(vvmCtx context.Context, cfg *VVMConfig, vvmPortSource *V
 			panic(err)
 		}
 		return resultFU
-	}, func() int { return vvmPortSource.adminGetter() })
+	}, func() int { return vvmPortSource.adminGetter() }, policyForWithRetry)
 }
 
 // Metrics service port could be dynamic -> need a func that will return the actual port
